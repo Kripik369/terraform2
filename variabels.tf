@@ -1,3 +1,4 @@
+
 variable "folder_id" {
   description = "ID каталога в Yandex Cloud"
   type        = string
@@ -47,4 +48,13 @@ variable "subnet_cidr" {
   description = "CIDR для публичной подсети"
   type        = string
   default     = "10.1.1.0/24"
+}
+variable "service_account_key_file" {
+  description = "Путь к JSON-ключу сервисного аккаунта"
+  type        = string
+}
+variable "service_account_id" {
+  description = "ID существующего сервисного аккаунта."
+  type        = string
+  default     = ""
 }

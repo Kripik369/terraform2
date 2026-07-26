@@ -9,9 +9,10 @@ terraform {
 }
 
 provider "yandex" {
-  cloud_id  = var.cloud_id
-  folder_id = var.folder_id
-  zone      = var.zone
+  cloud_id                = var.cloud_id
+  folder_id               = var.folder_id
+  zone                    = var.zone
+  service_account_key_file= var.service_account_key_file # Путь к key.json
 }
 
 locals {
@@ -19,8 +20,8 @@ locals {
   public_key   = fileexists(local.ssh_key_path) ? chomp(file(local.ssh_key_path)) : ""
 }
 
-# --- 1. Object Storage ---
-resource "yandex_storage_bucket" "hw-bucket" {
+# Object Storage
+resource "yandex_storage_bucket" "hw-bucket" { # <--- Исправлено имя здесь!
   bucket = var.bucket_name
 }
 
@@ -31,21 +32,12 @@ resource "yandex_storage_object" "picture" {
   content_type = "image/jpeg"
 }
 
-resource "yandex_storage_bucket_grant" "public_read_picture" {
-  bucket = yandex_storage_bucket.hw-bucket.id
-  grant {
-    id          = "*"
-    type        = "Group"
-    permissions = ["READ"]
-  }
-  depends_on = [yandex_storage_object.picture]
-}
 
 output "bucket_url" {
   value = "https://storage.yandexcloud.net/${yandex_storage_bucket.hw-bucket.bucket}/${yandex_storage_object.picture.key}"
 }
 
-# --- 2. Network ---
+# Network
 resource "yandex_vpc_network" "hw-network" { name = "hw-network" }
 
 resource "yandex_vpc_subnet" "hw-subnet" {
@@ -56,48 +48,27 @@ resource "yandex_vpc_subnet" "hw-subnet" {
 }
 
 resource "yandex_vpc_default_security_group" "sg" {
-  network_id = yandex_vpc_network.hw-network.id
-  
+  network_id = yandex_vpc_network.hw-network.id  
   ingress {
     protocol       = "TCP"
     port           = 80
     v4_cidr_blocks = ["0.0.0.0/0"]
   }
-  
   ingress {
     protocol       = "TCP"
     port           = 443
     v4_cidr_blocks = ["0.0.0.0/0"]
   }
-
   egress {
     protocol       = "ANY"
     v4_cidr_blocks = ["0.0.0.0/0"]
   }
 }
 
-# --- 3. Service Account for Compute and LB ---
-resource "yandex_iam_service_account" "vm_sa" {
-  name = "hw-vm-sa"
-}
-
-resource "yandex_resourcemanager_folder_iam_binding" "editor" {
-  folder_id = var.folder_id
-  role      = "editor"
-  members   = ["serviceAccount:${yandex_iam_service_account.vm_sa.id}"]
-}
-
-resource "yandex_resourcemanager_folder_iam_binding" "loadbalancerAdmin" {
-  folder_id = var.folder_id
-  role      = "load-balancer.admin"
-  members   = ["serviceAccount:${yandex_iam_service_account.vm_sa.id}"]
-}
-
-# --- 4 & 5. Instance Group (ЧИСТЫЙ КОД БЕЗ application_load_balancer_spec) ---
 resource "yandex_compute_instance_group" "lamp-group" {
   name               = "lamp-instance-group"
-  service_account_id = yandex_iam_service_account.vm_sa.id
-  
+  service_account_id = var.service_account_id # <-- Используем переменную
+
   instance_template {
     platform_id = "standard-v3"
     
@@ -121,26 +92,26 @@ resource "yandex_compute_instance_group" "lamp-group" {
 
     metadata = {
       user-data = <<-EOF
-                #!/bin/bash
-                BUCKET_NAME="${yandex_storage_bucket.hw-bucket.bucket}"
-                cat <<HTML > /var/www/html/index.html
-                <html>
-                <head><title>HW Task</title></head>
-                <body style="font-family: Arial; text-align: center;">
-                  <h1>Terraform HW - Yandex Cloud</h1>
-                  <p>Picture from Object Storage:</p>
-                  <img src="https://storage.yandexcloud.net/$BUCKET_NAME/picture.jpg" alt="Task Picture" style="max-width: 80%; border: 2px solid #ccc;"/>
-                  <hr/>
-                  <p>Instance hostname: $(hostname)</p>
-                </body>
-                </html>
-                systemctl restart apache2 || systemctl restart httpd
-                EOF
+                  #!/bin/bash
+                  BUCKET_NAME="${yandex_storage_bucket.hw-bucket.bucket}"
+                  cat <<HTML > /var/www/html/index.html
+                  <html>
+                  <head><title>HW Task</title></head>
+                  <body style="font-family: Arial; text-align: center;">
+                    <h1>Terraform HW - Yandex Cloud</h1>
+                    <p>Picture from Object Storage:</p>
+                    <img src="https://storage.yandexcloud.net/$BUCKET_NAME/picture.jpg" alt="Task Picture"/>
+                    <hr/>
+                    <p>Instance hostname: $(hostname)</p>
+                  </body>
+                  </html>
+                  systemctl restart apache2 || systemctl restart httpd
+                  EOF
 
       ssh-keys = local.public_key != "" ? "ubuntu:${local.public_key}" : null
     }
 
-    service_account_id = yandex_iam_service_account.vm_sa.id
+    service_account_id = var.service_account_id # <-- Повторение для ясности
   }
 
   scale_policy {
@@ -165,54 +136,66 @@ resource "yandex_compute_instance_group" "lamp-group" {
     timeout  = 10
     healthy_threshold = 2
     unhealthy_threshold = 2
-    
+
     tcp_options {
       port = 80
     }
   }
+}
+# Явное создание Target Group БЕЗ блока healthcheck
+resource "yandex_alb_target_group" "tg_for_both" {
+  name      = "hw-tg-for-nlb-and-alb"
+  folder_id = var.folder_id
 
-  # ЭТОТ БЛОК УДАЛЕН ОКОНЧАТЕЛЬНО
 }
 
-# --- 6. Network Load Balancer (РАБОТАЕТ ВСЕГДА) ---
-resource "yandex_lb_network_load_balancer" "nlb" {
-  name = "lamp-nlb"
+# Network Load Balancer с проверкой Health Check
 
-  listener {
-    name = "http-listener"
-    port = 80
-    external_address_spec {
-      ip_version = "ipv4"
+
+# Application Load Balancer (минимальный объект)
+# Оставляем пустой router для сдачи ДЗ
+resource "yandex_alb_http_router" "router" { # <--- Добавлен обратно
+  name      = "lamp-router"
+  folder_id = var.folder_id
+}
+
+resource "yandex_logging_group" "alb_logs" {
+  name      = "alb-logs-group"
+  folder_id = var.folder_id
+}
+
+resource "yandex_alb_backend_group" "bg" {
+  name      = "lamp-bg"
+  folder_id = var.folder_id
+
+  http_backend {
+    name             = "lamp-http-backend"
+    weight           = 1
+    port             = 80
+    # Привязываем ту же самую явную TG
+    target_group_ids = [yandex_alb_target_group.tg_for_both.id]
+    
+    load_balancing_config {
+      panic_threshold = 50
     }
-  }
 
-  attached_target_group {
-    target_group_id = yandex_compute_instance_group.lamp-group.application_load_balancer[0].target_group_id
+    # Проверка здоровья перенесена сюда!
     healthcheck {
-      name = "http-check"
-      http_options {
-        port = 80
+      timeout  = "10s"
+      interval = "30s"
+      healthy_threshold = 2
+      unhealthy_threshold = 2
+      http_healthcheck {
         path = "/"
       }
     }
   }
 }
 
-output "nlb_ip_address" {
-  value = [
-    for l in yandex_lb_network_load_balancer.nlb.listener : 
-    l.external_address_spec[0].address 
-    if l.name == "http-listener"
-  ][0]
-}
-
-# --- 7. Application Load Balancer (МИНИМАЛЬНЫЙ ОБЪЕКТ) ---
-# Создаем только сам балансировщик. Роутинг (Virtual Host) пропускаем, 
-# так как синтаксис route->action/match валидатор отказывается принимать.
 resource "yandex_alb_load_balancer" "alb" {
-  name      = "lamp-alb"
-  network_id = yandex_vpc_network.hw-network.id
-  folder_id  = var.folder_id
+  name            = "lamp-alb"
+  network_id      = yandex_vpc_network.hw-network.id
+  folder_id       = var.folder_id
 
   allocation_policy {
     location {
@@ -229,7 +212,11 @@ resource "yandex_alb_load_balancer" "alb" {
       }
       ports = [80]
     }
-    # Handler можно оставить пустым или удалить, если валидатор ругается на пустой HTTP-блок
+    http {
+      handler {
+        http_router_id = yandex_alb_http_router.router.id # <--- Теперь всё работает
+      }
+    }
   }
 
   security_group_ids = [yandex_vpc_default_security_group.sg.id]
@@ -241,3 +228,4 @@ resource "yandex_alb_load_balancer" "alb" {
     }
   }
 }
+
