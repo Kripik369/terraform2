@@ -1,14 +1,15 @@
-output "public_vm_external_ip" {
-  value = yandex_compute_instance.public-vm.network_interface.0.nat_ip_address
-  description = "Публичный IP для входа в bastion-хост"
+output "bucket_url" {
+  value = "https://storage.yandexcloud.net/${yandex_storage_bucket.hw-bucket.bucket}/${yandex_storage_object.picture.key}"
 }
 
-output "private_vm_internal_ip" {
-  value = yandex_compute_instance.private-vm.network_interface.0.ip_address
-  description = "Внутренний IP приватной машины"
+output "nlb_ip_address" {
+  value = yandex_lb_network_load_balancer.nlb.listener[0].external_address_spec[0].address
 }
 
-output "nat_instance_internal_ip" {
-  value = yandex_compute_instance.nat-instance.network_interface.0.ip_address
-  description = "Внутренний IP NAT-инстанса"
+output "alb_ip_address" {
+  value = yandex_alb_load_balancer.alb.listener[0].endpoint[0].address[0].external_ipv4_address[0].address
+}
+
+output "vm_external_ips" {
+  value = [for vm in yandex_compute_instance_group.lamp-group.instances : vm.network_interface[0].nat_ip_address]
 }
